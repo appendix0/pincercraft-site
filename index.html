@@ -1,0 +1,2110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>PincerCraft — an orderly AI player for Minecraft</title>
+<meta name="description" content="PincerCraft is a Mindcraft fork that turns the in-game AI into a Claude-Code-style agent: a prioritized action queue with Plan Mode, a live in-game Code of Conduct, and a closed-loop eval cycle that improves its own code." />
+
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Press+Start+2P&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
+
+<script>
+  // Runs before render: strip any non-tab hash so the browser
+  // doesn't auto-scroll to e.g. #demo on refresh.
+  (function () {
+    if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
+    var h = location.hash;
+    if (h && h !== '#what' && h !== '#how' && h !== '#progress') {
+      history.replaceState(null, '', location.pathname + location.search);
+    }
+  })();
+</script>
+
+<style>
+  :root {
+    --bg:        #0e1410;
+    --bg-2:      #131b16;
+    --panel:     #18211b;
+    --panel-2:   #1d2922;
+    --line:      #2a3a30;
+    --line-2:    #344a3c;
+    --ink:       #e9f1ea;
+    --ink-dim:   #a7b5ab;
+    --ink-mute:  #6f7e74;
+    --grass:     #4caf3a;
+    --grass-2:   #6dd459;
+    --dirt:      #8b5a2b;
+    --gold:      #ffb84a;
+    --diamond:   #4ad6ff;
+    --redstone:  #e44a4a;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: 'Inter', system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    color: var(--ink);
+    background: var(--bg);
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  a { color: var(--grass-2); text-decoration: none; }
+  a:hover { color: var(--ink); }
+  code, .mono { font-family: 'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace; }
+
+  /* ---------- world background ---------- */
+  .world-bg {
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    overflow: hidden;
+    pointer-events: none;
+    background: #050908;
+  }
+  .world-bg > * {
+    position: absolute;
+    inset: 0;
+    will-change: transform;
+  }
+
+  /* base gradient + dim green ambient */
+  .bg-gradient {
+    background:
+      radial-gradient(900px 600px at 30% 18%, rgba(76, 175, 58, 0.07), transparent 65%),
+      radial-gradient(700px 500px at 82% 60%, rgba(76, 175, 58, 0.04), transparent 70%),
+      radial-gradient(1200px 700px at 50% 112%, rgba(40, 100, 60, 0.10), transparent 70%),
+      linear-gradient(180deg, #060a08 0%, #050908 55%, #030605 100%);
+    animation: ambientPulse 22s ease-in-out infinite;
+  }
+  @keyframes ambientPulse {
+    0%, 100% { opacity: 1;    }
+    50%      { opacity: 0.88; }
+  }
+
+  /* faint chunk grid — like a server blueprint */
+  .bg-chunk-grid {
+    background-image:
+      linear-gradient(rgba(76, 175, 58, 0.045) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(76, 175, 58, 0.045) 1px, transparent 1px);
+    background-size: 32px 32px;
+    mask-image: radial-gradient(ellipse 80% 70% at 50% 35%, black 0%, rgba(0,0,0,0.4) 60%, transparent 100%);
+    -webkit-mask-image: radial-gradient(ellipse 80% 70% at 50% 35%, black 0%, rgba(0,0,0,0.4) 60%, transparent 100%);
+    opacity: 0.7;
+  }
+
+  /* volumetric fog */
+  .bg-fog-inner {
+    position: absolute;
+    inset: -10%;
+    background:
+      radial-gradient(800px 400px at 22% 28%, rgba(40, 80, 55, 0.10), transparent 70%),
+      radial-gradient(900px 500px at 78% 50%, rgba(50, 80, 60, 0.07), transparent 70%),
+      radial-gradient(700px 350px at 50% 82%, rgba(30, 60, 45, 0.10), transparent 70%);
+    filter: blur(40px);
+    animation: fogDrift 80s ease-in-out infinite;
+  }
+  @keyframes fogDrift {
+    0%, 100% { transform: translate(0, 0) scale(1);    }
+    33%      { transform: translate(40px, -20px) scale(1.04); }
+    66%      { transform: translate(-30px, 25px) scale(1.02); }
+  }
+
+  /* voxel terrain silhouettes — bottom of viewport */
+  .bg-terrain {
+    inset: auto 0 0 0;
+    height: auto;
+    pointer-events: none;
+  }
+  .bg-terrain svg {
+    display: block;
+    width: 100%;
+  }
+  .bg-terrain-far  { z-index: 1; }
+  .bg-terrain-far  svg  { height: 180px; }
+  .bg-terrain-far  path { fill: #0a1110; }
+  .bg-terrain-mid  { z-index: 2; }
+  .bg-terrain-mid  svg  { height: 200px; }
+  .bg-terrain-mid  path { fill: #060c0a; }
+  .bg-terrain-near { z-index: 3; }
+  .bg-terrain-near svg  { height: 200px; }
+  .bg-terrain-near path { fill: #020403; }
+
+  /* torches — tiny warm flickering points along the horizon */
+  .bg-torches { z-index: 4; }
+  .torch {
+    position: absolute;
+    width: 3px;
+    height: 3px;
+    border-radius: 1px;
+    background: #ffb260;
+    box-shadow:
+      0 0 6px 1px rgba(255, 178, 96, 0.6),
+      0 0 22px 4px rgba(255, 130, 50, 0.18);
+    animation: torchFlicker 2.4s ease-in-out infinite;
+  }
+  .torch:nth-child(2) { animation-delay: -0.7s; animation-duration: 3.1s; }
+  .torch:nth-child(3) { animation-delay: -1.5s; animation-duration: 2.0s; }
+  .torch:nth-child(4) { animation-delay: -2.1s; animation-duration: 2.7s; }
+  .torch:nth-child(5) { animation-delay: -0.4s; animation-duration: 3.4s; }
+  @keyframes torchFlicker {
+    0%, 100% { opacity: 0.55; transform: scale(1);    }
+    18%      { opacity: 0.88; transform: scale(1.08); }
+    31%      { opacity: 0.35; transform: scale(0.92); }
+    52%      { opacity: 0.95; transform: scale(1.10); }
+    68%      { opacity: 0.50; transform: scale(0.98); }
+    84%      { opacity: 0.75; transform: scale(1.04); }
+  }
+
+  /* chunk-loading scanline — rare sweep */
+  .bg-scanline {
+    inset: auto 0 auto 0;
+    height: 90px;
+    top: -90px;
+    background: linear-gradient(180deg,
+      transparent 0%,
+      rgba(109, 212, 89, 0.0)  68%,
+      rgba(109, 212, 89, 0.06) 88%,
+      rgba(109, 212, 89, 0.22) 98%,
+      rgba(109, 212, 89, 0.55) 100%
+    );
+    border-bottom: 1px solid rgba(109, 212, 89, 0.45);
+    box-shadow:
+      0 1px 12px rgba(109, 212, 89, 0.25),
+      0 0 60px rgba(109, 212, 89, 0.05);
+    opacity: 0;
+    z-index: 5;
+    animation: scanSweep 42s linear infinite;
+  }
+  @keyframes scanSweep {
+    0%   { transform: translateY(0);                       opacity: 0;   }
+    1%   {                                                 opacity: 0.7; }
+    9%   { transform: translateY(calc(100vh + 90px));      opacity: 0.7; }
+    10%  { transform: translateY(calc(100vh + 90px));      opacity: 0;   }
+    100% { transform: translateY(calc(100vh + 90px));      opacity: 0;   }
+  }
+
+  /* vignette — focus attention center, darken corners */
+  .bg-vignette {
+    background: radial-gradient(ellipse 90% 75% at 50% 40%, transparent 30%, rgba(0,0,0,0.45) 80%, rgba(0,0,0,0.70) 100%);
+    z-index: 6;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .bg-gradient,
+    .bg-fog-inner,
+    .torch,
+    .bg-scanline { animation: none !important; }
+  }
+
+  /* ---------- nav ---------- */
+  .nav {
+    position: sticky; top: 0; z-index: 50;
+    backdrop-filter: blur(10px);
+    background: rgba(14, 20, 16, 0.78);
+    border-bottom: 1px solid var(--line);
+  }
+  .nav-inner {
+    max-width: 1180px; margin: 0 auto;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 28px;
+  }
+  .brand {
+    display: flex; align-items: center; gap: 12px;
+    font-family: 'Press Start 2P', monospace;
+    font-size: 13px; letter-spacing: 0.5px;
+    color: var(--ink);
+  }
+  .brand-block {
+    width: 22px; height: 22px;
+    background:
+      linear-gradient(180deg, var(--grass-2) 0 35%, var(--dirt) 35% 100%);
+    border: 2px solid #000;
+    box-shadow: inset -2px -2px 0 rgba(0,0,0,0.25), inset 2px 2px 0 rgba(255,255,255,0.15);
+    image-rendering: pixelated;
+  }
+  .nav-links { display: flex; gap: 6px; align-items: center; }
+  .nav-link {
+    color: var(--ink-dim); padding: 8px 14px; border-radius: 999px;
+    font-weight: 500; font-size: 14px;
+    transition: background .15s, color .15s;
+  }
+  .nav-link:hover { color: var(--ink); background: var(--panel); }
+  .nav-cta {
+    margin-left: 8px;
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 8px 14px;
+    background: var(--panel);
+    border: 1px solid var(--line-2);
+    border-radius: 999px;
+    color: var(--ink); font-weight: 600; font-size: 13px;
+  }
+  .nav-cta:hover { background: var(--panel-2); border-color: var(--grass); color: var(--ink); }
+  .lock { font-size: 11px; color: var(--ink-mute); }
+
+  /* ---------- hero ---------- */
+  .hero {
+    position: relative;
+    padding: 110px 28px 90px;
+    overflow: hidden;
+    min-height: 70vh;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    border-bottom: 1px solid var(--line);
+    background:
+      radial-gradient(900px 500px at 80% -10%, rgba(76,175,58,0.10), transparent 60%),
+      radial-gradient(700px 400px at 10% 100%, rgba(74,214,255,0.05), transparent 60%);
+  }
+  .hero-grid {
+    position: absolute; inset: 0;
+    background-image:
+      linear-gradient(rgba(255,255,255,0.025) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,0.025) 1px, transparent 1px);
+    background-size: 48px 48px;
+    mask-image: radial-gradient(circle at 50% 30%, black 0%, transparent 75%);
+    pointer-events: none;
+  }
+  /* hero background image — full-bleed, fades out on scroll */
+  .hero-bg {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    background-color: #4ba627;
+    background-image: url("hero-bg.webp");
+    background-size: contain;
+    background-position: center right;
+    background-repeat: no-repeat;
+    will-change: opacity;
+    pointer-events: none;
+  }
+  .hero-bg::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background:
+      linear-gradient(90deg, rgba(8,26,6,0.72) 0%, rgba(8,26,6,0.36) 52%, rgba(8,26,6,0.05) 100%),
+      linear-gradient(180deg, rgba(8,26,6,0.26) 0%, rgba(8,26,6,0.10) 40%, rgba(8,26,6,0.58) 100%);
+  }
+  .hero-inner {
+    position: relative;
+    z-index: 1;
+    max-width: 1180px; margin: 0 auto;
+    display: grid; grid-template-columns: 1.2fr 1fr; gap: 56px; align-items: center;
+  }
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 6px 12px;
+    border: 1px solid var(--line-2);
+    border-radius: 999px;
+    color: var(--grass-2);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    margin-bottom: 22px;
+  }
+  .eyebrow .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--grass-2);
+    box-shadow: 0 0 10px var(--grass-2);
+  }
+  h1.hero-title {
+    font-family: 'Press Start 2P', monospace;
+    font-size: 40px; line-height: 1.25; margin: 0 0 22px;
+    letter-spacing: 0.5px;
+  }
+  h1.hero-title .accent { color: var(--grass-2); }
+  .hero-sub {
+    font-size: 18px; color: var(--ink-dim);
+    max-width: 540px; margin: 0 0 32px;
+  }
+  .hero-actions { display: flex; gap: 12px; flex-wrap: wrap; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 10px;
+    padding: 13px 22px;
+    border-radius: 10px;
+    font-weight: 600; font-size: 15px;
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition: transform .08s ease, background .15s, border-color .15s;
+  }
+  .btn:active { transform: translateY(1px); }
+  .btn-primary {
+    background: var(--grass);
+    color: #0b0f0a;
+    border-color: #2f7a23;
+    box-shadow: inset 0 -3px 0 rgba(0,0,0,0.25);
+  }
+  .btn-primary:hover { background: var(--grass-2); color: #0b0f0a; }
+  .btn-ghost {
+    background: var(--panel);
+    color: var(--ink);
+    border-color: var(--line-2);
+  }
+  .btn-ghost:hover { background: var(--panel-2); border-color: var(--grass); }
+
+  /* hero card — stylized terminal */
+  .hero-card {
+    background: var(--panel);
+    border: 1px solid var(--line-2);
+    border-radius: 14px;
+    overflow: hidden;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+  }
+  .hero-card-head {
+    display: flex; align-items: center; gap: 10px;
+    padding: 12px 16px;
+    background: var(--panel-2);
+    border-bottom: 1px solid var(--line);
+  }
+  .hero-card-head .pip { width: 10px; height: 10px; border-radius: 50%; background: #3a4a40; }
+  .hero-card-head .pip.r { background: #e07a7a; }
+  .hero-card-head .pip.y { background: #e0c47a; }
+  .hero-card-head .pip.g { background: #7ae08a; }
+  .hero-card-head .title {
+    margin-left: 8px; font-family: 'JetBrains Mono', monospace; font-size: 12px;
+    color: var(--ink-mute);
+  }
+  .hero-card-body {
+    padding: 18px 18px 22px;
+    font-family: 'JetBrains Mono', monospace; font-size: 13.5px;
+    line-height: 1.75;
+  }
+  .chat-row { display: flex; gap: 10px; align-items: center; padding: 4px 0; }
+  .chat-name {
+    font-family: 'Press Start 2P', monospace;
+    font-size: 10px;
+    letter-spacing: 0.3px;
+    flex-shrink: 0;
+  }
+  .chat-name.player { color: var(--diamond); }
+  .chat-name.bot    { color: var(--grass-2); }
+  .chat-name.sys    { color: var(--gold); }
+  .chat-msg { color: var(--ink-dim); }
+  .chat-tag {
+    font-family: 'Press Start 2P', monospace;
+    padding: 3px 6px; border-radius: 4px;
+    font-size: 8.5px; color: var(--ink-mute);
+    border: 1px solid var(--line-2);
+    margin-left: 6px;
+    letter-spacing: 0.3px;
+    opacity: 0;
+    transition: opacity .25s ease-out;
+  }
+  .chat-tag.is-visible { opacity: 1; }
+
+  /* hero chat — JS-driven typewriter; rows fade-up when shown */
+  @keyframes cursorBlink {
+    0%, 49%   { opacity: 1; }
+    50%, 100% { opacity: 0; }
+  }
+  .hero-card-body .chat-row {
+    opacity: 0;
+    transform: translateY(6px);
+    transition: opacity .35s ease-out, transform .35s ease-out;
+  }
+  .hero-card-body .chat-row.is-visible {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  /* inline typing cursor on the currently-typing message */
+  .chat-msg.is-typing::after {
+    content: "▌";
+    color: var(--grass-2);
+    margin-left: 1px;
+    animation: cursorBlink 0.75s steps(1, end) infinite;
+  }
+
+  /* persistent bottom cursor — session is alive */
+  .chat-cursor {
+    display: inline-block;
+    width: 7px; height: 14px;
+    background: var(--grass-2);
+    margin-top: 8px;
+    box-shadow: 0 0 8px rgba(109, 212, 89, 0.55);
+    animation: cursorBlink 1.05s steps(1, end) 0.6s infinite;
+  }
+
+  /* respect reduced-motion preference */
+  @media (prefers-reduced-motion: reduce) {
+    .hero-card-body .chat-row { opacity: 1; transform: none; transition: none; }
+    .chat-tag { opacity: 1; }
+    .chat-msg.is-typing::after { display: none; }
+    .chat-cursor { animation: none; }
+  }
+
+  /* ---------- tabs section ---------- */
+  section.tabs-wrap {
+    max-width: 1180px; margin: 0 auto;
+    padding: 72px 28px 40px;
+  }
+  .tabs {
+    display: flex; gap: 6px; flex-wrap: wrap;
+    padding: 6px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    width: max-content;
+    margin: 0 auto 40px;
+  }
+  .tab {
+    appearance: none;
+    border: 0; background: transparent;
+    color: var(--ink-dim);
+    padding: 10px 20px;
+    border-radius: 10px;
+    font-family: inherit; font-size: 14px; font-weight: 600;
+    cursor: pointer;
+    transition: background .15s, color .15s;
+  }
+  .tab:hover { color: var(--ink); }
+  .tab.is-active {
+    background: var(--grass);
+    color: #0b0f0a;
+    box-shadow: inset 0 -3px 0 rgba(0,0,0,0.25);
+  }
+
+  .panel {
+    display: none;
+    animation: fade .25s ease;
+  }
+  .panel.is-active { display: block; }
+  @keyframes fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+  h2.section-title {
+    font-family: 'Press Start 2P', monospace;
+    font-size: 22px; margin: 0 0 12px;
+  }
+  .section-sub {
+    color: var(--ink-dim); font-size: 17px; max-width: 760px; margin: 0 0 32px;
+  }
+
+  /* feature grid */
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 18px;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 26px;
+    transition: border-color .2s, transform .2s;
+  }
+  .card:hover { border-color: var(--line-2); transform: translateY(-2px); }
+  .card .icon {
+    width: 36px; height: 36px;
+    background: var(--panel-2);
+    border: 1px solid var(--line-2);
+    border-radius: 8px;
+    display: grid; place-items: center;
+    margin-bottom: 16px;
+    font-family: 'Press Start 2P', monospace; font-size: 14px; color: var(--grass-2);
+  }
+  .card h3 { margin: 0 0 8px; font-size: 18px; }
+  .card p { margin: 0; color: var(--ink-dim); font-size: 15px; }
+
+  /* how-it-works flow */
+  .flow {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 14px;
+    margin-top: 8px;
+  }
+  .flow-step {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 20px;
+    position: relative;
+  }
+  .flow-num {
+    font-family: 'Press Start 2P', monospace;
+    color: var(--grass-2); font-size: 12px;
+    margin-bottom: 12px;
+  }
+  .flow-step h4 { margin: 0 0 6px; font-size: 16px; }
+  .flow-step p { margin: 0; font-size: 14px; color: var(--ink-dim); }
+
+  /* queue mode table */
+  .queue-table {
+    margin-top: 32px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    overflow: hidden;
+  }
+  .queue-table table { width: 100%; border-collapse: collapse; }
+  .queue-table th, .queue-table td {
+    text-align: left; padding: 14px 18px;
+    border-bottom: 1px solid var(--line);
+    font-size: 14.5px;
+  }
+  .queue-table thead th {
+    background: var(--panel-2);
+    color: var(--ink-dim);
+    font-weight: 600; font-size: 12px;
+    text-transform: uppercase; letter-spacing: 0.6px;
+  }
+  .queue-table tbody tr:last-child td { border-bottom: 0; }
+  .queue-table .mode {
+    color: var(--grass-2);
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 600;
+  }
+
+  /* progress / roadmap */
+  .roadmap {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 18px;
+  }
+  .road-col h3 {
+    font-family: 'Press Start 2P', monospace;
+    font-size: 13px; color: var(--ink-dim);
+    margin: 0 0 14px;
+  }
+  .road-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+  .road-item {
+    display: flex; gap: 12px; align-items: flex-start;
+    background: var(--panel); border: 1px solid var(--line);
+    padding: 14px 16px; border-radius: 10px;
+  }
+  .road-item .pill {
+    font-family: 'Press Start 2P', monospace;
+    font-size: 9px;
+    letter-spacing: 0.5px;
+    padding: 5px 9px;
+    border-radius: 999px;
+    flex-shrink: 0;
+    border: 1px solid;
+  }
+  .pill.done   { color: var(--grass-2);  border-color: rgba(109,212,89,0.35);  background: rgba(109,212,89,0.08); }
+  .pill.wip    { color: var(--gold);     border-color: rgba(255,184,74,0.35);  background: rgba(255,184,74,0.08); }
+  .pill.next   { color: var(--diamond);  border-color: rgba(74,214,255,0.35);  background: rgba(74,214,255,0.08); }
+  .pill.block  { color: var(--redstone); border-color: rgba(228,74,74,0.35);   background: rgba(228,74,74,0.08); }
+  .road-item .txt { font-size: 14.5px; color: var(--ink); }
+  .road-item .txt small { display: block; color: var(--ink-mute); font-size: 12.5px; margin-top: 2px; }
+
+  /* stats strip */
+  .stats {
+    display: grid; grid-template-columns: repeat(4, 1fr);
+    gap: 14px; margin: 28px 0 0;
+  }
+  .stat {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 12px; padding: 18px;
+  }
+  .stat .num {
+    font-family: 'Press Start 2P', monospace;
+    color: var(--grass-2); font-size: 22px;
+    margin-bottom: 6px;
+  }
+  .stat .lbl { color: var(--ink-dim); font-size: 13px; }
+
+  /* demo */
+  .demo-wrap {
+    max-width: 1180px; margin: 0 auto;
+    padding: 30px 28px 100px;
+  }
+  .demo-frame {
+    position: relative;
+    aspect-ratio: 16 / 9;
+    background:
+      repeating-linear-gradient(45deg, #15201a 0 12px, #131b16 12px 24px);
+    border: 1px solid var(--line-2);
+    border-radius: 18px;
+    overflow: hidden;
+    display: grid; place-items: center;
+  }
+  .demo-frame::before {
+    content: "";
+    position: absolute; inset: 0;
+    background:
+      radial-gradient(circle at 50% 50%, rgba(76,175,58,0.15), transparent 60%);
+  }
+  .demo-msg {
+    position: relative;
+    text-align: center;
+    padding: 24px;
+  }
+  .play {
+    width: 78px; height: 78px;
+    border-radius: 50%;
+    background: var(--grass);
+    border: 4px solid #0b0f0a;
+    display: grid; place-items: center;
+    margin: 0 auto 18px;
+    box-shadow: 0 8px 30px rgba(76,175,58,0.4);
+  }
+  .play::before {
+    content: "";
+    border-style: solid;
+    border-width: 14px 0 14px 22px;
+    border-color: transparent transparent transparent #0b0f0a;
+    margin-left: 5px;
+  }
+  .demo-msg h3 { margin: 0 0 6px; font-family: 'Press Start 2P', monospace; font-size: 16px; }
+  .demo-msg p  { margin: 0; color: var(--ink-dim); font-size: 14px; }
+
+  /* ---------- agent runtime cockpit ---------- */
+  .ops-session-meta {
+    text-align: center;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    color: var(--ink-mute);
+    margin: 0 0 26px;
+    letter-spacing: 0.5px;
+  }
+  .ops-session-meta span { color: var(--grass-2); }
+
+  /* divider between video and live runtime */
+  .ops-divider {
+    display: flex; align-items: center; gap: 18px;
+    margin: 56px 0 22px;
+  }
+  .ops-divider::before, .ops-divider::after {
+    content: "";
+    flex: 1; height: 1px;
+    background: linear-gradient(90deg, transparent, var(--line-2), transparent);
+  }
+  .ops-divider span {
+    font-family: 'Press Start 2P', monospace;
+    font-size: 9.5px;
+    color: var(--ink-mute);
+    letter-spacing: 1.5px;
+    white-space: nowrap;
+  }
+
+  .ops-runtime-strip {
+    display: grid;
+    grid-template-columns: minmax(280px, 1fr) auto minmax(140px, auto);
+    align-items: center;
+    gap: 24px;
+    padding: 16px 22px;
+    margin-bottom: 14px;
+    background: linear-gradient(180deg, rgba(20, 30, 24, 0.78), rgba(10, 18, 13, 0.85));
+    border: 1px solid var(--line-2);
+    border-radius: 14px;
+    position: relative;
+  }
+  .ops-runtime-strip::before {
+    content: "";
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 3px;
+    border-radius: 14px 0 0 14px;
+    background: var(--ink-mute);
+    transition: background .3s, box-shadow .3s;
+  }
+  .ops-runtime-strip.state-scanning::before    { background: var(--diamond);  box-shadow: 0 0 10px var(--diamond); }
+  .ops-runtime-strip.state-planning::before    { background: var(--gold);     box-shadow: 0 0 10px var(--gold); }
+  .ops-runtime-strip.state-executing::before   { background: var(--grass-2);  box-shadow: 0 0 10px var(--grass-2); }
+  .ops-runtime-strip.state-interrupted::before { background: var(--redstone); box-shadow: 0 0 14px var(--redstone); animation: stripeAlert .35s ease-in-out infinite; }
+  .ops-runtime-strip.state-resuming::before    { background: var(--diamond);  box-shadow: 0 0 10px var(--diamond); }
+  .ops-runtime-strip.state-done::before        { background: var(--grass-2);  box-shadow: 0 0 6px var(--grass-2); }
+  @keyframes stripeAlert {
+    0%, 100% { opacity: 1;   }
+    50%      { opacity: 0.4; }
+  }
+
+  .ops-state-block { display: flex; align-items: center; gap: 14px; }
+  .ops-state-led {
+    width: 12px; height: 12px;
+    border-radius: 50%;
+    background: var(--ink-mute);
+    box-shadow: 0 0 6px var(--ink-mute);
+    flex-shrink: 0;
+    transition: background .25s, box-shadow .25s;
+  }
+  .ops-runtime-strip.state-scanning    .ops-state-led { background: var(--diamond);  box-shadow: 0 0 10px var(--diamond);  animation: ledBlink 1.0s ease-in-out infinite; }
+  .ops-runtime-strip.state-planning    .ops-state-led { background: var(--gold);     box-shadow: 0 0 10px var(--gold);     animation: ledBlink 1.0s ease-in-out infinite; }
+  .ops-runtime-strip.state-executing   .ops-state-led { background: var(--grass-2);  box-shadow: 0 0 10px var(--grass-2);  animation: ledBlink 1.4s ease-in-out infinite; }
+  .ops-runtime-strip.state-interrupted .ops-state-led { background: var(--redstone); box-shadow: 0 0 12px var(--redstone); animation: ledAlert 0.35s ease-in-out infinite; }
+  .ops-runtime-strip.state-resuming    .ops-state-led { background: var(--diamond);  box-shadow: 0 0 10px var(--diamond);  animation: ledBlink 0.8s ease-in-out infinite; }
+  .ops-runtime-strip.state-done        .ops-state-led { background: var(--grass-2);  box-shadow: 0 0 6px var(--grass-2); }
+  @keyframes ledBlink { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+  @keyframes ledAlert { 0%, 100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.3); opacity: 0.6; } }
+
+  .ops-state-info { display: flex; flex-direction: column; min-width: 130px; }
+  .ops-state-tag {
+    font-family: 'Press Start 2P', monospace;
+    font-size: 9.5px;
+    color: var(--ink-mute);
+    letter-spacing: 1px;
+    margin-bottom: 6px;
+  }
+  .ops-state-value {
+    font-family: 'Press Start 2P', monospace;
+    font-size: 15px;
+    letter-spacing: 0.8px;
+    color: var(--ink);
+    transition: color .25s;
+  }
+  .ops-runtime-strip.state-scanning    .ops-state-value { color: var(--diamond); }
+  .ops-runtime-strip.state-planning    .ops-state-value { color: var(--gold); }
+  .ops-runtime-strip.state-executing   .ops-state-value { color: var(--grass-2); }
+  .ops-runtime-strip.state-interrupted .ops-state-value { color: var(--redstone); }
+  .ops-runtime-strip.state-resuming    .ops-state-value { color: var(--diamond); }
+  .ops-runtime-strip.state-done        .ops-state-value { color: var(--ink-dim); }
+
+  .ops-state-action {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13.5px;
+    color: var(--ink-dim);
+    padding-left: 16px;
+    margin-left: 4px;
+    border-left: 1px solid var(--line-2);
+    min-width: 0;
+    flex: 1;
+  }
+
+  /* timeline */
+  .ops-timeline { display: flex; align-items: center; gap: 0; padding: 0 4px; }
+  .ops-phase-dot {
+    display: flex; flex-direction: column; align-items: center; gap: 6px;
+    position: relative;
+    min-width: 38px;
+  }
+  .ops-phase-dot::before {
+    content: "";
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    background: transparent;
+    border: 1.5px solid var(--line-2);
+    transition: background .25s, border-color .25s, box-shadow .25s;
+  }
+  .ops-phase-dot.is-done::before {
+    background: var(--grass-2);
+    border-color: var(--grass-2);
+  }
+  .ops-phase-dot.is-active::before {
+    background: var(--grass-2);
+    border-color: var(--grass-2);
+    box-shadow: 0 0 10px var(--grass-2);
+    animation: dotPulse 1.2s ease-in-out infinite;
+  }
+  .ops-phase-dot.is-alert.is-active::before {
+    background: var(--redstone);
+    border-color: var(--redstone);
+    box-shadow: 0 0 10px var(--redstone);
+    animation: dotAlert 0.35s ease-in-out infinite;
+  }
+  .ops-phase-dot.is-alert.is-done::before {
+    background: var(--redstone);
+    border-color: var(--redstone);
+  }
+  @keyframes dotPulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.25); } }
+  @keyframes dotAlert { 0%, 100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.4); opacity: 0.55; } }
+  .ops-phase-dot span {
+    font-family: 'Press Start 2P', monospace;
+    font-size: 8.5px;
+    color: var(--ink-mute);
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+  }
+  .ops-phase-dot.is-active span { color: var(--grass-2); }
+  .ops-phase-dot.is-alert.is-active span { color: var(--redstone); }
+  .ops-phase-line {
+    width: 22px;
+    height: 1.5px;
+    background: var(--line-2);
+    margin-bottom: 16px; /* align with dots */
+    transition: background .25s;
+  }
+  .ops-phase-line.is-done { background: var(--grass-2); }
+  .ops-phase-line.is-alert { background: var(--redstone); }
+
+  .ops-clock-block { text-align: right; }
+  .ops-clock-value {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 26px;
+    font-weight: 600;
+    letter-spacing: 1.5px;
+    color: var(--grass-2);
+    text-shadow: 0 0 8px rgba(109, 212, 89, 0.3);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* 3-panel grid */
+  .ops-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1.15fr;
+    gap: 12px;
+    height: 460px;
+  }
+  .ops-panel {
+    display: flex; flex-direction: column;
+    background: rgba(18, 25, 21, 0.85);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+  .ops-panel-head {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 9px 13px;
+    background: rgba(10, 16, 13, 0.65);
+    border-bottom: 1px solid var(--line);
+  }
+  .ops-panel-title {
+    font-family: 'Press Start 2P', monospace;
+    font-size: 10px;
+    color: var(--ink-dim);
+    letter-spacing: 1.2px;
+  }
+  .ops-panel-meta {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    color: var(--ink-mute);
+  }
+  .ops-panel-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px 13px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--line-2) transparent;
+  }
+  .ops-panel-body::-webkit-scrollbar { width: 6px; }
+  .ops-panel-body::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 3px; }
+  .ops-panel-body::-webkit-scrollbar-track { background: transparent; }
+
+  /* chat panel rows */
+  .ops-chat-row {
+    display: flex; gap: 8px; align-items: flex-start;
+    padding: 5px 0;
+    opacity: 0;
+    transform: translateY(4px);
+    transition: opacity .3s ease-out, transform .3s ease-out;
+  }
+  .ops-chat-row.is-visible { opacity: 1; transform: none; }
+  .ops-chat-name {
+    font-family: 'Press Start 2P', monospace;
+    font-size: 9px;
+    letter-spacing: 0.3px;
+    flex-shrink: 0;
+    padding-top: 1px;
+  }
+  .ops-chat-name.player { color: var(--diamond); }
+  .ops-chat-name.bot    { color: var(--grass-2); }
+  .ops-chat-name.sys    { color: var(--gold); }
+  .ops-chat-msg {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    color: var(--ink-dim);
+    line-height: 1.55;
+    word-break: break-word;
+  }
+  .ops-chat-msg.is-typing::after {
+    content: "▌";
+    color: var(--grass-2);
+    margin-left: 1px;
+    animation: cursorBlink 0.7s steps(1, end) infinite;
+  }
+
+  /* task queue cards */
+  .ops-task {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 10px;
+    padding: 10px 12px;
+    background: rgba(10, 16, 13, 0.45);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    margin-bottom: 8px;
+    opacity: 0;
+    transform: translateY(6px);
+    transition: opacity .25s, transform .25s, border-color .3s, background .3s;
+  }
+  .ops-task.is-visible { opacity: 1; transform: none; }
+  .ops-task-name {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    color: var(--ink);
+    word-break: break-word;
+    min-width: 0;
+  }
+  .ops-task-status {
+    font-family: 'Press Start 2P', monospace;
+    font-size: 8.5px;
+    padding: 5px 8px;
+    border-radius: 4px;
+    letter-spacing: 0.5px;
+    border: 1px solid;
+    flex-shrink: 0;
+  }
+  .ops-task.status-queued       .ops-task-status { color: var(--ink-mute); border-color: rgba(160,170,164,0.30); }
+  .ops-task.status-scanning     .ops-task-status { color: var(--diamond);  border-color: rgba(74,214,255,0.40);  background: rgba(74,214,255,0.06); }
+  .ops-task.status-planning     .ops-task-status { color: var(--gold);     border-color: rgba(255,184,74,0.40);  background: rgba(255,184,74,0.06); }
+  .ops-task.status-executing    .ops-task-status { color: var(--grass-2);  border-color: rgba(109,212,89,0.45);  background: rgba(109,212,89,0.08); animation: blinkSoft 1.2s ease-in-out infinite; }
+  .ops-task.status-paused       .ops-task-status { color: var(--gold);     border-color: rgba(255,184,74,0.45);  background: rgba(255,184,74,0.06); animation: blinkSoft 1.2s ease-in-out infinite; }
+  .ops-task.status-paused                        { border-color: rgba(255,184,74,0.20); }
+  .ops-task.status-done         .ops-task-status { color: var(--grass-2);  border-color: rgba(109,212,89,0.35);  background: rgba(109,212,89,0.05); }
+  .ops-task.status-done         .ops-task-name   { color: var(--ink-dim); }
+  .ops-task.status-interrupted                   { border-color: rgba(228,74,74,0.40); background: rgba(228,74,74,0.07); }
+  .ops-task.status-interrupted  .ops-task-status { color: var(--redstone); border-color: rgba(228,74,74,0.50);   background: rgba(228,74,74,0.10); animation: alertBlink 0.4s ease-in-out infinite; }
+  .ops-task.status-resolved     .ops-task-status { color: var(--ink-dim);  border-color: rgba(160,170,164,0.35); }
+  .ops-task.status-resolved     .ops-task-name   { color: var(--ink-dim); }
+  @keyframes blinkSoft  { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
+  @keyframes alertBlink { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
+
+  /* terminal log lines */
+  .ops-log-line {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--ink-dim);
+    white-space: pre-wrap;
+    word-break: break-word;
+    display: flex;
+    gap: 8px;
+    padding: 2px 0;
+    opacity: 0;
+    animation: logIn 0.25s ease-out forwards;
+  }
+  @keyframes logIn {
+    from { opacity: 0; transform: translateX(-3px); }
+    to   { opacity: 1; transform: none; }
+  }
+  .ops-log-time { color: var(--ink-mute); flex-shrink: 0; font-variant-numeric: tabular-nums; }
+  .ops-log-tag  { flex-shrink: 0; font-weight: 500; }
+  .ops-log-tag.scan    { color: var(--diamond);  }
+  .ops-log-tag.plan    { color: var(--gold);     }
+  .ops-log-tag.exec    { color: var(--grass-2);  }
+  .ops-log-tag.builder { color: var(--grass-2);  }
+  .ops-log-tag.sys     { color: var(--gold);     }
+  .ops-log-tag.combat  { color: var(--redstone); }
+  .ops-log-msg { color: var(--ink-dim); min-width: 0; }
+
+  /* ---------- MC in-game chat styling (left panel only) ---------- */
+  .ops-mc-chat {
+    background: rgba(8, 12, 10, 0.92);
+    border-color: rgba(40, 50, 44, 0.6);
+  }
+  .ops-mc-chat .ops-panel-body {
+    background: rgba(0, 0, 0, 0.55);
+    padding: 12px 12px;
+  }
+  .ops-mc-chat .ops-chat-row {
+    padding: 4px 0;
+    gap: 8px;
+    align-items: baseline;
+  }
+  .ops-mc-chat .ops-chat-name,
+  .ops-mc-chat .ops-chat-msg {
+    font-family: 'Press Start 2P', monospace;
+    font-size: 10.5px;
+    line-height: 1.85;
+    letter-spacing: 0.2px;
+    text-shadow: 1px 1px 0 rgba(0, 0, 0, 0.75);
+    -webkit-font-smoothing: none;
+    -moz-osx-font-smoothing: unset;
+  }
+  .ops-mc-chat .ops-chat-name        { color: #ffffff; font-size: 10.5px; padding-top: 0; }
+  .ops-mc-chat .ops-chat-name.player { color: #ffffff; }       /* MC default white */
+  .ops-mc-chat .ops-chat-name.bot    { color: #55ff55; }       /* MC §a green */
+  .ops-mc-chat .ops-chat-name.sys    { color: #ffff55; }       /* MC §e yellow */
+  .ops-mc-chat .ops-chat-msg         { color: #ffffff; }
+  .ops-mc-chat .ops-chat-row:has(.ops-chat-name.sys) .ops-chat-msg { color: #ffff55; }
+  .ops-mc-chat .ops-chat-msg.is-typing::after {
+    content: "_";
+    color: #ffffff;
+    text-shadow: 1px 1px 0 rgba(0, 0, 0, 0.75);
+    margin-left: 1px;
+    animation: cursorBlink 0.7s steps(1, end) infinite;
+  }
+
+  @media (max-width: 900px) {
+    .ops-runtime-strip { grid-template-columns: 1fr; text-align: left; }
+    .ops-state-action { padding-left: 0; margin-left: 0; border-left: 0; }
+    .ops-timeline { justify-content: center; flex-wrap: wrap; }
+    .ops-clock-block { text-align: left; }
+    .ops-grid { grid-template-columns: 1fr; height: auto; }
+    .ops-grid .ops-panel { height: 300px; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .ops-state-led, .ops-phase-dot::before, .ops-task-status,
+    .ops-runtime-strip::before { animation: none !important; }
+  }
+
+  /* contributors / "powered by" strip */
+  .contributors {
+    border-top: 1px solid var(--line);
+    background: linear-gradient(180deg, rgba(8, 14, 11, 0.55), rgba(4, 10, 7, 0.75));
+    padding: 56px 28px 48px;
+  }
+  .contributors-inner {
+    max-width: 1180px;
+    margin: 0 auto;
+    text-align: center;
+  }
+  .contributors h4 {
+    font-family: 'Press Start 2P', monospace;
+    font-size: 11px;
+    color: var(--ink-mute);
+    letter-spacing: 1.6px;
+    margin: 0 0 32px;
+  }
+  .logo-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 64px;
+    flex-wrap: wrap;
+  }
+  .logo {
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+    color: #4a5a50;
+    opacity: 0.7;
+    transition: opacity .25s ease, color .25s ease;
+  }
+  .logo:hover { opacity: 1; color: var(--ink-dim); }
+  .logo svg { width: 24px; height: 24px; flex-shrink: 0; }
+  .logo .name {
+    font-size: 19px;
+    font-weight: 600;
+    letter-spacing: 0.2px;
+  }
+  .logo.nvidia .name { font-weight: 800; letter-spacing: 1.2px; }
+  .logo.openai .name { font-weight: 500; }
+  .logo.anthropic .name { font-weight: 500; letter-spacing: -0.1px; }
+  .logo.gemini   .name { font-weight: 500; }
+
+  /* footer */
+  footer {
+    border-top: 1px solid var(--line);
+    background: linear-gradient(180deg, rgba(4, 10, 7, 0.55), rgba(0, 4, 2, 0.85));
+  }
+  .foot-inner {
+    max-width: 1180px; margin: 0 auto;
+    padding: 28px;
+    display: flex; align-items: center; justify-content: space-between;
+    color: var(--ink-mute); font-size: 13px;
+  }
+  .foot-inner a { color: var(--ink-dim); margin-left: 18px; }
+  .foot-inner a:hover { color: var(--grass-2); }
+
+  /* keyword emphasis — Minecraft-style gold pixel font */
+  .kw {
+    font-family: 'Press Start 2P', monospace;
+    color: var(--gold);
+    font-size: 0.7em;
+    letter-spacing: 0.4px;
+    vertical-align: 1px;
+    white-space: nowrap;
+  }
+
+  /* model picker */
+  .model-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 14px;
+    margin-top: 18px;
+  }
+  .model-card {
+    position: relative;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 22px;
+    transition: border-color .2s, transform .2s;
+  }
+  .model-card:hover { border-color: var(--line-2); transform: translateY(-2px); }
+  .model-card.free {
+    border-color: rgba(109,212,89,0.45);
+    background:
+      linear-gradient(180deg, rgba(109,212,89,0.07), transparent 55%),
+      var(--panel);
+  }
+  .model-card.free:hover { border-color: var(--grass-2); }
+  .free-badge {
+    position: absolute;
+    top: 14px; right: 14px;
+    font-family: 'Press Start 2P', monospace;
+    font-size: 9px; letter-spacing: 0.5px;
+    color: #0b0f0a;
+    background: var(--grass-2);
+    padding: 5px 8px;
+    border-radius: 6px;
+    box-shadow: inset 0 -2px 0 rgba(0,0,0,0.22);
+  }
+  .model-logo {
+    width: 36px; height: 36px;
+    border-radius: 8px;
+    background: var(--panel-2);
+    border: 1px solid var(--line-2);
+    display: grid; place-items: center;
+    font-family: 'Press Start 2P', monospace;
+    font-size: 13px;
+    margin-bottom: 14px;
+  }
+  .model-logo.a { color: #e07a5f; }
+  .model-logo.o { color: #10a37f; }
+  .model-logo.g { color: var(--diamond); }
+  .model-logo.n { color: var(--grass-2); }
+  .model-name { font-weight: 700; font-size: 15px; margin: 0 0 2px; }
+  .model-sub  { font-family: 'JetBrains Mono', monospace; font-size: 11.5px; color: var(--ink-mute); margin-bottom: 10px; }
+  .model-card p { margin: 0; font-size: 13.5px; color: var(--ink-dim); line-height: 1.5; }
+
+  /* responsive */
+  @media (max-width: 900px) {
+    .hero-inner { grid-template-columns: 1fr; gap: 32px; }
+    h1.hero-title { font-size: 28px; }
+    .cards { grid-template-columns: 1fr; }
+    .flow { grid-template-columns: 1fr 1fr; }
+    .roadmap { grid-template-columns: 1fr; }
+    .stats { grid-template-columns: 1fr 1fr; }
+    .model-grid { grid-template-columns: 1fr 1fr; }
+    .nav-links .nav-link { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ============ WORLD BACKGROUND ============ -->
+<div class="world-bg" aria-hidden="true">
+  <div class="bg-gradient"></div>
+  <div class="bg-chunk-grid"></div>
+  <div class="bg-fog"><div class="bg-fog-inner"></div></div>
+  <div class="bg-terrain bg-terrain-far">
+    <svg viewBox="0 0 2400 280" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">
+      <path id="terrain-far" />
+    </svg>
+  </div>
+  <div class="bg-terrain bg-terrain-mid">
+    <svg viewBox="0 0 2400 280" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">
+      <path id="terrain-mid" />
+    </svg>
+  </div>
+  <div class="bg-terrain bg-terrain-near">
+    <svg viewBox="0 0 2400 280" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">
+      <path id="terrain-near" />
+    </svg>
+  </div>
+  <div class="bg-torches">
+    <span class="torch" style="top:72%;left:9%"></span>
+    <span class="torch" style="top:81%;left:31%"></span>
+    <span class="torch" style="top:76%;left:56%"></span>
+    <span class="torch" style="top:84%;left:78%"></span>
+    <span class="torch" style="top:74%;left:93%"></span>
+  </div>
+  <div class="bg-scanline"></div>
+  <div class="bg-vignette"></div>
+</div>
+
+<!-- ============ NAV ============ -->
+<nav class="nav">
+  <div class="nav-inner">
+    <div class="brand">
+      <div class="brand-block" aria-hidden="true"></div>
+      PINCERCRAFT
+    </div>
+    <div class="nav-links">
+      <a class="nav-link" href="#what">What is it</a>
+      <a class="nav-link" href="#how">How it works</a>
+      <a class="nav-link" href="#progress">Progress</a>
+      <a class="nav-link" href="#demo">Demo</a>
+      <a class="nav-cta" href="https://github.com/" target="_blank" rel="noopener">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+          <path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.1.79-.25.79-.56v-2c-3.2.7-3.87-1.36-3.87-1.36-.52-1.34-1.28-1.69-1.28-1.69-1.05-.72.08-.71.08-.71 1.16.08 1.77 1.2 1.77 1.2 1.03 1.77 2.7 1.26 3.36.97.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.28 1.19-3.08-.12-.3-.52-1.47.11-3.06 0 0 .97-.31 3.18 1.18a11 11 0 0 1 5.79 0c2.21-1.49 3.18-1.18 3.18-1.18.63 1.59.23 2.76.11 3.06.74.8 1.19 1.82 1.19 3.08 0 4.42-2.69 5.39-5.25 5.68.41.35.78 1.05.78 2.12v3.14c0 .31.21.67.8.56C20.21 21.39 23.5 17.08 23.5 12 23.5 5.65 18.35.5 12 .5z"/>
+        </svg>
+        GitHub <span class="lock">· private</span>
+      </a>
+    </div>
+  </div>
+</nav>
+
+<!-- ============ HERO ============ -->
+<header class="hero">
+  <div class="hero-bg" aria-hidden="true"></div>
+  <div class="hero-inner">
+    <div>
+      <span class="eyebrow"><span class="dot"></span> v2 live · self-improving agent · 2026</span>
+      <h1 class="hero-title">Claude Code,<br/>but for <span class="accent">Minecraft</span>.</h1>
+      <p class="hero-sub">
+        An AI agent that plays Minecraft with the discipline of Claude Code.
+        It runs <span class="kw">Plan Mode</span> before real tasks — and improves its own
+        code through a graded, human-approved <span class="kw">eval loop</span>.
+      </p>
+      <div class="hero-actions">
+        <a class="btn btn-primary" href="#what">Read the overview</a>
+        <a class="btn btn-ghost" href="#demo">Watch the demo</a>
+      </div>
+    </div>
+
+  </div>
+</header>
+
+<!-- ============ DEMO / AGENT RUNTIME ============ -->
+<section class="demo-wrap" id="demo">
+  <h2 class="section-title" style="text-align:center; margin-bottom: 24px;">See it in action</h2>
+
+  <!-- Demo video placeholder -->
+  <div class="demo-frame" aria-label="Demo video placeholder">
+    <div class="demo-msg">
+      <div class="play" aria-hidden="true"></div>
+      <h3>DEMO VIDEO</h3>
+      <p>Coming soon &middot; drop a <code>&lt;video&gt;</code> or <code>&lt;iframe&gt;</code> in this block.</p>
+    </div>
+  </div>
+
+  <!-- Live runtime divider -->
+  <div class="ops-divider"><span>LIVE AGENT RUNTIME &middot; session 4f2a8 &middot; loop 32s</span></div>
+
+  <div class="ops-runtime-strip" id="ops-strip">
+    <div class="ops-state-block">
+      <div class="ops-state-led" id="ops-led" aria-hidden="true"></div>
+      <div class="ops-state-info">
+        <div class="ops-state-tag">STATE</div>
+        <div class="ops-state-value" id="ops-state-name">IDLE</div>
+      </div>
+      <div class="ops-state-action" id="ops-state-action">awaiting input</div>
+    </div>
+
+    <div class="ops-timeline" id="ops-timeline" aria-hidden="true">
+      <div class="ops-phase-dot" data-i="1"><span>scan</span></div>
+      <div class="ops-phase-line"></div>
+      <div class="ops-phase-dot" data-i="2"><span>plan</span></div>
+      <div class="ops-phase-line"></div>
+      <div class="ops-phase-dot" data-i="3"><span>exec</span></div>
+      <div class="ops-phase-line"></div>
+      <div class="ops-phase-dot is-alert" data-i="4"><span>int</span></div>
+      <div class="ops-phase-line"></div>
+      <div class="ops-phase-dot is-alert" data-i="5"><span>recov</span></div>
+      <div class="ops-phase-line"></div>
+      <div class="ops-phase-dot" data-i="6"><span>resume</span></div>
+      <div class="ops-phase-line"></div>
+      <div class="ops-phase-dot" data-i="7"><span>done</span></div>
+    </div>
+
+    <div class="ops-clock-block">
+      <div class="ops-state-tag">RUNTIME</div>
+      <div class="ops-clock-value" id="ops-clock">00:00</div>
+    </div>
+  </div>
+
+  <div class="ops-grid">
+    <div class="ops-panel ops-mc-chat">
+      <div class="ops-panel-head">
+        <span class="ops-panel-title">CHAT</span>
+        <span class="ops-panel-meta">/sess/4f2a8/chat</span>
+      </div>
+      <div class="ops-panel-body" id="ops-chat-body"></div>
+    </div>
+
+    <div class="ops-panel">
+      <div class="ops-panel-head">
+        <span class="ops-panel-title">TASK QUEUE</span>
+        <span class="ops-panel-meta">session_lane</span>
+      </div>
+      <div class="ops-panel-body" id="ops-queue-body"></div>
+    </div>
+
+    <div class="ops-panel">
+      <div class="ops-panel-head">
+        <span class="ops-panel-title">AGENT LOG</span>
+        <span class="ops-panel-meta">tail -f agent.log</span>
+      </div>
+      <div class="ops-panel-body" id="ops-log-body"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ TABS ============ -->
+<section class="tabs-wrap">
+  <div class="tabs" role="tablist" aria-label="Project sections">
+    <button class="tab is-active" data-tab="what"     role="tab" aria-selected="true">What is PincerCraft?</button>
+    <button class="tab"           data-tab="how"      role="tab" aria-selected="false">How does it work?</button>
+    <button class="tab"           data-tab="progress" role="tab" aria-selected="false">Progress</button>
+  </div>
+
+  <!-- ----- WHAT ----- -->
+  <div class="panel is-active" id="what" data-panel="what" role="tabpanel">
+    <h2 class="section-title">What is PincerCraft?</h2>
+    <p class="section-sub">
+      A fork of <a href="https://github.com/kolbytn/mindcraft" target="_blank" rel="noopener">Mindcraft</a>
+      that keeps everything good and adds <span class="kw">order</span> on top.
+    </p>
+
+    <div class="cards">
+      <div class="card">
+        <div class="icon">QUE</div>
+        <h3>Prioritized action queue</h3>
+        <p>
+          One <span class="kw">serial lane</span> handles every signal — chat, game events, self-prompts.
+          <span class="kw">Four queue modes</span> decide what happens when input arrives mid-task.
+        </p>
+      </div>
+
+      <div class="card">
+        <div class="icon">COC</div>
+        <h3>Live Code of Conduct + memory</h3>
+        <p>
+          Rules live in a <span class="kw">writable book</span> on a <span class="kw">lectern</span> — edit
+          it in vanilla Minecraft and new rules apply in <span class="kw">~2 seconds</span>.
+          <span class="kw">Layered memory</span> (server · bot · per-player) persists what it learns across reboots.
+        </p>
+      </div>
+
+      <div class="card">
+        <div class="icon">PLN</div>
+        <h3>Plan Mode, like Claude Code</h3>
+        <p>
+          Before acting, the bot uses <span class="kw">read-only tools</span> to look around
+          and drafts a plan with <span class="kw">real coordinates</span>. No more
+          <code>(0,0,0)</code> hallucinations.
+        </p>
+      </div>
+
+      <div class="card">
+        <div class="icon">EXE</div>
+        <h3>Discovery-first executor</h3>
+        <p>
+          It <span class="kw">perceives before it targets</span> — search, scan, check inventory —
+          then bakes real coordinates into one action. Long jobs route to role-based
+          <span class="kw">subagents</span>: miner, builder, scout.
+        </p>
+      </div>
+
+      <div class="card">
+        <div class="icon">CYC</div>
+        <h3>Self-improving loop</h3>
+        <p>
+          A <span class="kw">task-giver</span> invents a challenge, the bot attempts it, metrics score the run,
+          an analyzer diagnoses, and an <span class="kw">improver</span> patches the code — on a branch,
+          for a human to approve. <span class="kw">Nothing auto-merges.</span>
+        </p>
+      </div>
+
+      <div class="card">
+        <div class="icon">EVL</div>
+        <h3>Spec-proof evaluation</h3>
+        <p>
+          Success is graded <span class="kw">deterministically</span> from a world-state snapshot — never the
+          bot's own word, which it's been caught faking. <span class="kw">Delta checks</span> and a
+          <span class="kw">train/eval split</span> keep every gain honest.
+        </p>
+      </div>
+    </div>
+
+    <div class="stats">
+      <div class="stat"><div class="num">5</div><div class="lbl">Structural features</div></div>
+      <div class="stat"><div class="num">6</div><div class="lbl">Self-improvement cycles</div></div>
+      <div class="stat"><div class="num">4</div><div class="lbl">Queue modes</div></div>
+      <div class="stat"><div class="num">197</div><div class="lbl">Tests on v2 modules</div></div>
+    </div>
+  </div>
+
+  <!-- ----- HOW ----- -->
+  <div class="panel" id="how" data-panel="how" role="tabpanel">
+    <h2 class="section-title">How does it work?</h2>
+    <p class="section-sub">
+      Every signal goes through <span class="kw">one ordered lane</span>.
+      The LLM only ever sees one task at a time.
+    </p>
+
+    <div class="flow">
+      <div class="flow-step">
+        <div class="flow-num">01 · INPUT</div>
+        <h4>Signal arrives</h4>
+        <p>Chat, game event, or self-prompt — all enter the <span class="kw">same lane</span>.</p>
+      </div>
+      <div class="flow-step">
+        <div class="flow-num">02 · ROUTE</div>
+        <h4>Queue mode picked</h4>
+        <p>Orchestrator picks <span class="kw">interrupt</span>, <span class="kw">steer</span>, <span class="kw">followup</span>, or <span class="kw">collect</span>.</p>
+      </div>
+      <div class="flow-step">
+        <div class="flow-num">03 · PLAN</div>
+        <h4>Look before leaping</h4>
+        <p>For real tasks, the bot enters <span class="kw">Plan Mode</span> and reads the world before writing any action.</p>
+      </div>
+      <div class="flow-step">
+        <div class="flow-num">04 · EXECUTE</div>
+        <h4>Act, with COC on top</h4>
+        <p>Tools run via <span class="kw">AbortController</span>. The <span class="kw">Code of Conduct</span> sits at the top of every prompt.</p>
+      </div>
+    </div>
+
+    <h3 style="margin-top:48px; font-family:'Press Start 2P',monospace; font-size:14px; color:var(--ink-dim);">The four queue modes</h3>
+    <div class="queue-table">
+      <table>
+        <thead>
+          <tr><th>Mode</th><th>Behavior</th><th>When to use</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="mode">interrupt</td>
+            <td>Abort the current run, switch to the new input immediately.</td>
+            <td>"Stop, come here."</td>
+          </tr>
+          <tr>
+            <td class="mode">steer</td>
+            <td>Inject the new input into the current run between tool calls.</td>
+            <td>"Also pick up dirt while you're at it."</td>
+          </tr>
+          <tr>
+            <td class="mode">followup</td>
+            <td>Let the current run finish, then start the new input.</td>
+            <td>"After the build, go to bed."</td>
+          </tr>
+          <tr>
+            <td class="mode">collect</td>
+            <td>Merge multiple follow-ups into one batched turn.</td>
+            <td>A burst of instructions handled together.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3 style="margin-top:48px; font-family:'Press Start 2P',monospace; font-size:14px; color:var(--ink-dim);">Pick your model</h3>
+    <p style="margin:6px 0 0; color:var(--ink-dim); font-size:15px;">
+      Bring your own API key — or run it completely <span class="kw">free</span>.
+    </p>
+
+    <div class="model-grid">
+      <div class="model-card">
+        <div class="model-logo a">A</div>
+        <div class="model-name">Anthropic Claude</div>
+        <div class="model-sub">Sonnet · Haiku · Opus</div>
+        <p>Best for <span class="kw">Plan Mode</span> and complex builds. Recommended default.</p>
+      </div>
+
+      <div class="model-card">
+        <div class="model-logo o">O</div>
+        <div class="model-name">OpenAI GPT</div>
+        <div class="model-sub">GPT-4.1 · GPT-5</div>
+        <p>Solid all-rounder. Great <span class="kw">tool-use</span> compatibility.</p>
+      </div>
+
+      <div class="model-card">
+        <div class="model-logo g">G</div>
+        <div class="model-name">Google Gemini</div>
+        <div class="model-sub">Gemini 2 Pro · Flash</div>
+        <p>Long context. <span class="kw">Cheap</span> Flash tier for chat-heavy runs.</p>
+      </div>
+
+      <div class="model-card free">
+        <div class="free-badge">FREE</div>
+        <div class="model-logo n">N</div>
+        <div class="model-name">NVIDIA Build</div>
+        <div class="model-sub">deepseek-v4-pro</div>
+        <p><span class="kw">100% free</span> NIM endpoint. No card required — just sign up at build.nvidia.com.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ----- PROGRESS ----- -->
+  <div class="panel" id="progress" data-panel="progress" role="tabpanel">
+    <h2 class="section-title">Progress</h2>
+    <p class="section-sub">
+      v2 has shipped — and the bot now improves itself. A <span class="kw">closed-loop eval cycle</span>
+      proposes code patches you approve; baseline <span class="kw">~45% task success</span> is the number it's built to raise.
+    </p>
+
+    <div class="roadmap">
+      <div class="road-col">
+        <h3>Shipped</h3>
+        <ul class="road-list">
+          <li class="road-item"><span class="pill done">DONE</span><div class="txt">Base Mindcraft + Mineflayer integration<small>multi-provider: Claude · OpenAI · Gemini · free NVIDIA NIM</small></div></li>
+          <li class="road-item"><span class="pill done">DONE</span><div class="txt">Lectern Code of Conduct + layered memory<small>rule changes apply in ~2s; server · bot · per-player memory</small></div></li>
+          <li class="road-item"><span class="pill done">DONE</span><div class="txt">Session lane + queue modes + Plan Mode<small>one ordered queue for every signal; propose → approve</small></div></li>
+          <li class="road-item"><span class="pill done">DONE</span><div class="txt">v2 orchestrator integrated &amp; live<small>discovery-first executor, role subagents, 197 assertions green</small></div></li>
+          <li class="road-item"><span class="pill done">DONE</span><div class="txt">Closed-loop self-improvement<small>task-giver → metrics → analyzer → improver, human-gated, SQLite record</small></div></li>
+          <li class="road-item"><span class="pill done">DONE</span><div class="txt">Deterministic anti-spec-gaming eval layer<small>world-state checks, delta semantics, train/eval split</small></div></li>
+        </ul>
+      </div>
+
+      <div class="road-col">
+        <h3>In flight &amp; next</h3>
+        <ul class="road-list">
+          <li class="road-item"><span class="pill wip">WIP</span><div class="txt">Gather reliability — real block-ops &gt; 0<small>coder still flails on navigate-and-mine; the loop's top target</small></div></li>
+          <li class="road-item"><span class="pill wip">WIP</span><div class="txt">Raise the ~45% baseline success<small>one human-approved patch per cycle, measured on held-out tasks</small></div></li>
+          <li class="road-item"><span class="pill done">DONE</span><div class="txt">Inventory-aware conduct + base protection<small>stop over-gathering; verify deliveries; never break beds/chests/fences</small></div></li>
+          <li class="road-item"><span class="pill next">NEXT</span><div class="txt">Orchestrator model lever<small>bump the chat model Haiku → Sonnet if prompt rules don't hold</small></div></li>
+          <li class="road-item"><span class="pill next">NEXT</span><div class="txt">Bedrock iPad → bot chat<small>workaround in place via <code>/msg</code>; web UI exposure exploratory</small></div></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ POWERED BY ============ -->
+<section class="contributors" aria-label="Model providers">
+  <div class="contributors-inner">
+    <h4>POWERED BY</h4>
+    <div class="logo-row">
+
+      <div class="logo anthropic" title="Anthropic">
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+          <path d="M7.5 4 L2 20 H5.4 L6.55 16.7 H12.45 L13.6 20 H17 L11.5 4 H7.5 Z M7.55 13.7 L9.5 8 L11.45 13.7 H7.55 Z"/>
+          <path d="M17 4 L22.5 20 H19.1 L13.6 4 H17 Z"/>
+        </svg>
+        <span class="name">Anthropic</span>
+      </div>
+
+      <div class="logo openai" title="OpenAI">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="9.5"/>
+          <ellipse cx="12" cy="12" rx="9.5" ry="4"/>
+          <ellipse cx="12" cy="12" rx="4" ry="9.5"/>
+        </svg>
+        <span class="name">OpenAI</span>
+      </div>
+
+      <div class="logo gemini" title="Google Gemini">
+        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+          <path d="M12 1 C12.4 6.8 17.2 11.6 23 12 C17.2 12.4 12.4 17.2 12 23 C11.6 17.2 6.8 12.4 1 12 C6.8 11.6 11.6 6.8 12 1 Z"/>
+        </svg>
+        <span class="name">Gemini</span>
+      </div>
+
+      <div class="logo nvidia" title="NVIDIA">
+        <svg viewBox="0 0 32 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+          <ellipse cx="16" cy="12" rx="13" ry="7"/>
+          <path d="M8 13 C 11 7 18 8 21 11 C 23 13 21 16 17 15"/>
+        </svg>
+        <span class="name">NVIDIA</span>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ============ FOOTER ============ -->
+<footer>
+  <div class="foot-inner">
+    <div>PincerCraft is a personal research project · not affiliated with Mojang or Microsoft.</div>
+    <div>
+      <a href="https://github.com/kolbytn/mindcraft" target="_blank" rel="noopener">Upstream Mindcraft</a>
+      <a href="https://docs.openclaw.ai/concepts/agent-loop" target="_blank" rel="noopener">OpenClaw inspiration</a>
+      <a href="https://github.com/" target="_blank" rel="noopener">GitHub (private)</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+  const tabs   = document.querySelectorAll('.tab');
+  const panels = document.querySelectorAll('.panel');
+
+  function activate(name) {
+    tabs.forEach(t => {
+      const on = t.dataset.tab === name;
+      t.classList.toggle('is-active', on);
+      t.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    panels.forEach(p => p.classList.toggle('is-active', p.dataset.panel === name));
+  }
+
+  tabs.forEach(t => t.addEventListener('click', () => {
+    activate(t.dataset.tab);
+    history.replaceState(null, '', '#' + t.dataset.tab);
+  }));
+
+  // Allow nav links #what / #how / #progress to switch the active tab.
+  document.querySelectorAll('.nav-link').forEach(a => {
+    a.addEventListener('click', e => {
+      const id = a.getAttribute('href').slice(1);
+      if (['what','how','progress'].includes(id)) activate(id);
+    });
+  });
+
+  // Honor a starting hash on load — but only for known tab hashes.
+  // Anything else (e.g. #demo) gets stripped so refresh doesn't jump there.
+  if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
+  const initial = location.hash.slice(1);
+  if (['what','how','progress'].includes(initial)) {
+    activate(initial);
+  } else if (location.hash) {
+    history.replaceState(null, '', location.pathname + location.search);
+    window.scrollTo(0, 0);
+  }
+
+  // "Watch the demo" — scroll smoothly without writing #demo to the URL.
+  document.querySelectorAll('a[href="#demo"]').forEach(a => {
+    a.addEventListener('click', e => {
+      e.preventDefault();
+      const target = document.getElementById('demo');
+      if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  });
+
+  /* ===== Hero chat typewriter + 30s loop ===== */
+  (function () {
+    const card = document.querySelector('.hero-card-body');
+    if (!card) return;
+    const rows = [...card.querySelectorAll('.chat-row')];
+    if (!rows.length) return;
+
+    // Snapshot original text once.
+    rows.forEach(row => {
+      const msg = row.querySelector('.chat-msg');
+      if (msg) msg.dataset.text = msg.textContent;
+    });
+
+    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    let timers = [];
+
+    function clearTimers() {
+      timers.forEach(clearTimeout);
+      timers = [];
+    }
+
+    function showAll() {
+      rows.forEach(row => {
+        row.classList.add('is-visible');
+        const msg = row.querySelector('.chat-msg');
+        if (msg) {
+          msg.textContent = msg.dataset.text || '';
+          msg.classList.remove('is-typing');
+        }
+        const tag = row.querySelector('.chat-tag');
+        if (tag) tag.classList.add('is-visible');
+      });
+    }
+
+    function reset() {
+      clearTimers();
+      rows.forEach(row => {
+        row.classList.remove('is-visible');
+        const msg = row.querySelector('.chat-msg');
+        if (msg) {
+          msg.textContent = '';
+          msg.classList.remove('is-typing');
+        }
+        const tag = row.querySelector('.chat-tag');
+        if (tag) tag.classList.remove('is-visible');
+      });
+    }
+
+    function play() {
+      reset();
+      if (reduceMotion) { showAll(); return; }
+
+      const CHAR_MS    = 28;   // per-character delay
+      const APPEAR_MS  = 220;  // row fade-in before typing
+      const TAG_DELAY  = 200;  // wait after typing before tag pops in
+      const ROW_GAP    = 420;  // pause between rows
+      let t = 350;
+
+      rows.forEach(row => {
+        const msg = row.querySelector('.chat-msg');
+        const tag = row.querySelector('.chat-tag');
+        const text = (msg && msg.dataset.text) || '';
+
+        // Row appears, message starts "typing"
+        timers.push(setTimeout(() => {
+          row.classList.add('is-visible');
+          if (msg) msg.classList.add('is-typing');
+        }, t));
+
+        const typeStart = t + APPEAR_MS;
+        for (let c = 0; c < text.length; c++) {
+          const idx = c;
+          timers.push(setTimeout(() => {
+            if (msg) msg.textContent = text.slice(0, idx + 1);
+          }, typeStart + idx * CHAR_MS));
+        }
+
+        const typeEnd = typeStart + text.length * CHAR_MS;
+
+        // Hide inline cursor after typing finishes
+        timers.push(setTimeout(() => {
+          if (msg) msg.classList.remove('is-typing');
+        }, typeEnd + 60));
+
+        // Tag pops in after a beat
+        if (tag) {
+          timers.push(setTimeout(() => tag.classList.add('is-visible'), typeEnd + TAG_DELAY));
+        }
+
+        t = typeEnd + (tag ? TAG_DELAY + 60 : 0) + ROW_GAP;
+      });
+    }
+
+    play();
+    if (!reduceMotion) setInterval(play, 30000);
+  })();
+
+  /* ===== World background: voxel terrain + subtle parallax ===== */
+  (function () {
+    // deterministic small PRNG so the silhouette is the same every load
+    function mulberry32(seed) {
+      let s = seed >>> 0;
+      return function () {
+        s = (s + 0x6D2B79F5) >>> 0;
+        let t = s;
+        t = Math.imul(t ^ (t >>> 15), t | 1);
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
+    }
+
+    function buildVoxelPath(width, height, blockSize, minY, maxY, seed) {
+      const rand = mulberry32(seed);
+      const blocks = Math.ceil(width / blockSize);
+      let y = (minY + maxY) / 2;
+      y = Math.round(y / blockSize) * blockSize;
+      let d = `M0 ${height} L0 ${y}`;
+      let prev = y;
+      for (let i = 0; i < blocks; i++) {
+        const r = rand();
+        if (r < 0.55) {
+          const dir = rand() < 0.5 ? -1 : 1;
+          const step = Math.ceil(rand() * 2) * blockSize * dir;
+          y = Math.max(minY, Math.min(maxY, y + step));
+          y = Math.round(y / blockSize) * blockSize;
+        }
+        const x1 = i * blockSize;
+        const x2 = (i + 1) * blockSize;
+        if (y !== prev) {
+          d += ` L${x1} ${y}`;
+          prev = y;
+        }
+        d += ` L${x2} ${y}`;
+      }
+      d += ` L${width} ${height} Z`;
+      return d;
+    }
+
+    const far  = document.getElementById('terrain-far');
+    const mid  = document.getElementById('terrain-mid');
+    const near = document.getElementById('terrain-near');
+    if (far)  far.setAttribute('d',  buildVoxelPath(2400, 280, 32, 130, 220, 1337));
+    if (mid)  mid.setAttribute('d',  buildVoxelPath(2400, 280, 24,  90, 200, 2718));
+    if (near) near.setAttribute('d', buildVoxelPath(2400, 280, 20,  50, 170, 31415));
+
+    // Subtle mouse parallax — desktop only
+    const isTouch = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (isTouch || reduceMotion) return;
+
+    const layers = [
+      { el: document.querySelector('.bg-fog'),          x: 6,  y: 3   },
+      { el: document.querySelector('.bg-terrain-far'),  x: 4,  y: 1.5 },
+      { el: document.querySelector('.bg-terrain-mid'),  x: 9,  y: 2.5 },
+      { el: document.querySelector('.bg-terrain-near'), x: 14, y: 4   },
+    ].filter(l => l.el);
+
+    let tx = 0, ty = 0, raf = null;
+    function apply() {
+      layers.forEach(l => {
+        l.el.style.transform = `translate3d(${tx * -l.x}px, ${ty * -l.y}px, 0)`;
+      });
+      raf = null;
+    }
+    window.addEventListener('mousemove', (e) => {
+      tx = (e.clientX / window.innerWidth  - 0.5) * 2;
+      ty = (e.clientY / window.innerHeight - 0.5) * 2;
+      if (!raf) raf = requestAnimationFrame(apply);
+    }, { passive: true });
+  })();
+
+  /* ===== Agent runtime cockpit: scripted timeline + loop ===== */
+  (function () {
+    const root = document.getElementById('demo');
+    if (!root) return;
+
+    const els = {
+      strip:       document.getElementById('ops-strip'),
+      stateName:   document.getElementById('ops-state-name'),
+      stateAction: document.getElementById('ops-state-action'),
+      timeline:    document.getElementById('ops-timeline'),
+      clock:       document.getElementById('ops-clock'),
+      chat:        document.getElementById('ops-chat-body'),
+      queue:       document.getElementById('ops-queue-body'),
+      log:         document.getElementById('ops-log-body'),
+    };
+    if (!els.strip || !els.chat || !els.queue || !els.log) return;
+
+    let timers = [];
+    let clockInterval = null;
+    let tStart = 0;
+
+    function clearTimers() {
+      timers.forEach(clearTimeout);
+      timers = [];
+      if (clockInterval) { clearInterval(clockInterval); clockInterval = null; }
+    }
+
+    function reset() {
+      clearTimers();
+      els.chat.innerHTML  = '';
+      els.queue.innerHTML = '';
+      els.log.innerHTML   = '';
+      setState('IDLE', 'awaiting input');
+      setPhase(0);
+      setClock(0);
+    }
+
+    function setState(name, action) {
+      const cls = ({
+        IDLE:        'state-idle',
+        SCANNING:    'state-scanning',
+        PLANNING:    'state-planning',
+        EXECUTING:   'state-executing',
+        INTERRUPTED: 'state-interrupted',
+        RESUMING:    'state-resuming',
+        DONE:        'state-done',
+      })[name] || 'state-idle';
+      els.strip.className = 'ops-runtime-strip ' + cls;
+      els.stateName.textContent = name;
+      if (action) els.stateAction.textContent = action;
+      const phaseMap = { IDLE: 0, SCANNING: 1, PLANNING: 2, EXECUTING: 3, INTERRUPTED: 4, RESUMING: 6, DONE: 7 };
+      if (name in phaseMap) setPhase(phaseMap[name]);
+    }
+
+    // Mark phases 1..i as done, dot i as active.
+    function setPhase(i) {
+      const dots  = els.timeline.querySelectorAll('.ops-phase-dot');
+      const lines = els.timeline.querySelectorAll('.ops-phase-line');
+      dots.forEach((d, idx) => {
+        const n = idx + 1;
+        d.classList.remove('is-active', 'is-done');
+        if (n  <  i) d.classList.add('is-done');
+        if (n === i) d.classList.add('is-active');
+      });
+      lines.forEach((l, idx) => {
+        l.classList.remove('is-done', 'is-alert');
+        if (idx + 1 < i) {
+          // Recov phase (5) is reached via alert path → red line into it
+          if (idx + 1 === 3 || idx + 1 === 4) l.classList.add('is-alert');
+          else l.classList.add('is-done');
+        }
+      });
+    }
+
+    function setClock(ms) {
+      const s  = Math.floor(ms / 1000);
+      const mm = String(Math.floor(s / 60)).padStart(2, '0');
+      const ss = String(s % 60).padStart(2, '0');
+      els.clock.textContent = mm + ':' + ss;
+    }
+
+    function chat(name, who, msg) {
+      const row     = document.createElement('div');
+      row.className = 'ops-chat-row';
+      const nameEl  = document.createElement('span');
+      nameEl.className = 'ops-chat-name ' + who;
+      // MC chat format: <player>, <bot>, [SYSTEM]
+      const display = (who === 'sys') ? '[' + name + ']' : '<' + name + '>';
+      nameEl.textContent = display;
+      const msgEl   = document.createElement('span');
+      msgEl.className = 'ops-chat-msg is-typing';
+      row.appendChild(nameEl);
+      row.appendChild(msgEl);
+      els.chat.appendChild(row);
+      requestAnimationFrame(() => row.classList.add('is-visible'));
+      // type out chars
+      const CHAR_MS = 26;
+      for (let i = 0; i < msg.length; i++) {
+        const idx = i;
+        timers.push(setTimeout(() => {
+          msgEl.textContent = msg.slice(0, idx + 1);
+          els.chat.scrollTop = els.chat.scrollHeight;
+        }, idx * CHAR_MS));
+      }
+      timers.push(setTimeout(() => {
+        msgEl.classList.remove('is-typing');
+      }, msg.length * CHAR_MS + 80));
+    }
+
+    function task(id, name, status, opts) {
+      opts = opts || {};
+      let card = els.queue.querySelector('[data-tid="' + id + '"]');
+      if (!card) {
+        card = document.createElement('div');
+        card.dataset.tid = id;
+        const nameEl   = document.createElement('span');
+        nameEl.className = 'ops-task-name';
+        nameEl.textContent = name;
+        const statusEl = document.createElement('span');
+        statusEl.className = 'ops-task-status';
+        card.appendChild(nameEl);
+        card.appendChild(statusEl);
+        if (opts.prepend) els.queue.prepend(card);
+        else els.queue.appendChild(card);
+        requestAnimationFrame(() => card.classList.add('is-visible'));
+      }
+      card.className = 'ops-task is-visible status-' + status.toLowerCase();
+      card.querySelector('.ops-task-status').textContent = status;
+      if (!opts.prepend) els.queue.scrollTop = els.queue.scrollHeight;
+    }
+
+    function log(tag, msg) {
+      const ms = Date.now() - tStart;
+      const s  = (ms / 1000).toFixed(1);
+      const line = document.createElement('div');
+      line.className = 'ops-log-line';
+      const timeEl = document.createElement('span');
+      timeEl.className = 'ops-log-time';
+      timeEl.textContent = s.padStart(5, '0');
+      const tagEl  = document.createElement('span');
+      tagEl.className = 'ops-log-tag ' + tag;
+      tagEl.textContent = '[' + tag + ']';
+      const msgEl  = document.createElement('span');
+      msgEl.className = 'ops-log-msg';
+      msgEl.textContent = msg;
+      line.appendChild(timeEl);
+      line.appendChild(tagEl);
+      line.appendChild(msgEl);
+      els.log.appendChild(line);
+      els.log.scrollTop = els.log.scrollHeight;
+    }
+
+    // ===== scripted timeline =====
+    const SCRIPT = [
+      { at:   300, fn: () => chat('LosPollos929', 'player', 'build a watchtower near spawn') },
+
+      // SCANNING ============================================================
+      { at:  1500, fn: () => setState('SCANNING', 'analyzing environment') },
+      { at:  1600, fn: () => task('t1', 'analyze_environment', 'SCANNING') },
+      { at:  1900, fn: () => log('scan', 'reading bot.entity.position') },
+      { at:  2400, fn: () => log('scan', '!nearbyBlocks radius=24') },
+      { at:  3000, fn: () => log('scan', 'biome=plains light=14 surface_y=68') },
+      { at:  3600, fn: () => log('scan', '!findSpawnPoint -> (-12, 68, 4)') },
+      { at:  4200, fn: () => task('t1', 'analyze_environment', 'DONE') },
+
+      // PLANNING ============================================================
+      { at:  4500, fn: () => setState('PLANNING', 'decomposing task') },
+      { at:  4600, fn: () => task('t2', 'decompose_task', 'PLANNING') },
+      { at:  4900, fn: () => log('plan', 'enter Plan Mode') },
+      { at:  5400, fn: () => log('plan', 'decomposing watchtower (4x4x12)') },
+      { at:  5900, fn: () => log('plan', 'subtasks -> gather_wood, craft, build') },
+      { at:  6400, fn: () => task('t2', 'decompose_task', 'DONE') },
+      { at:  6500, fn: () => task('t3', 'gather_wood (12x oak_log)', 'QUEUED') },
+      { at:  6650, fn: () => task('t4', 'craft_materials',          'QUEUED') },
+      { at:  6800, fn: () => task('t5', 'construct_watchtower',     'QUEUED') },
+      { at:  7200, fn: () => chat('pincer_bot', 'bot', 'plan ready. ETA 92s.') },
+
+      // EXECUTING ===========================================================
+      { at:  7700, fn: () => setState('EXECUTING', 'dispatching subagent: builder') },
+      { at:  7900, fn: () => log('exec', 'dispatch subagent -> builder') },
+      { at:  8200, fn: () => log('builder', '!smartGather oak_log 12') },
+      { at:  8400, fn: () => task('t3', 'gather_wood (12x oak_log)', 'EXECUTING') },
+      { at:  8800, fn: () => log('builder', '+3 oak_log') },
+      { at:  9400, fn: () => log('builder', '+8 oak_log') },
+      { at: 10000, fn: () => log('builder', '+12 oak_log (done)') },
+      { at: 10200, fn: () => task('t3', 'gather_wood (12x oak_log)', 'DONE') },
+      { at: 10400, fn: () => task('t4', 'craft_materials', 'EXECUTING') },
+      { at: 10500, fn: () => log('builder', 'craft oak_planks x48') },
+      { at: 11000, fn: () => log('builder', 'craft sticks x16') },
+      { at: 11400, fn: () => task('t4', 'craft_materials', 'DONE') },
+      { at: 11600, fn: () => task('t5', 'construct_watchtower', 'EXECUTING') },
+      { at: 11700, fn: () => els.strip.querySelector('#ops-state-action').textContent = 'building watchtower (layer 1/12)' },
+      { at: 11900, fn: () => log('builder', 'place oak_log @ (-12, 68, 4)') },
+      { at: 12500, fn: () => log('builder', 'place oak_log @ (-12, 69, 4)') },
+      { at: 13100, fn: () => log('builder', 'place oak_log @ (-12, 70, 4)') },
+
+      // INTERRUPTION ========================================================
+      { at: 13500, fn: () => setState('INTERRUPTED', 'hostile entity detected') },
+      { at: 13600, fn: () => log('sys', '! entity_detected: zombie d=6.2') },
+      { at: 13900, fn: () => log('sys', 'mode_trigger: self_defense') },
+      { at: 14100, fn: () => chat('SYSTEM', 'sys', 'low_health=12 -> interrupt') },
+      { at: 14300, fn: () => log('sys', 'AbortController.abort(builder)') },
+      { at: 14500, fn: () => task('t5', 'construct_watchtower', 'PAUSED') },
+      { at: 14700, fn: () => task('combat', 'combat: 1x zombie', 'INTERRUPTED', { prepend: true }) },
+
+      // RECOVERY ============================================================
+      { at: 14900, fn: () => setPhase(5) },  // step into 'recov' dot
+      { at: 15000, fn: () => log('combat', '!attack zombie') },
+      { at: 15400, fn: () => log('combat', 'damage 5.0 -> 14.0 hp') },
+      { at: 15900, fn: () => log('combat', 'entity_killed: zombie') },
+      { at: 16200, fn: () => log('combat', 'threat cleared') },
+      { at: 16400, fn: () => task('combat', 'combat: 1x zombie', 'RESOLVED') },
+
+      // RESUMING ============================================================
+      { at: 16700, fn: () => setState('RESUMING', 'rehydrating session queue') },
+      { at: 16900, fn: () => log('sys', 'reactivate session_lane') },
+      { at: 17100, fn: () => chat('pincer_bot', 'bot', 'resumed. continuing build.') },
+      { at: 17500, fn: () => setState('EXECUTING', 'building watchtower (layer 4/12)') },
+      { at: 17600, fn: () => task('t5', 'construct_watchtower', 'EXECUTING') },
+      { at: 17800, fn: () => log('builder', 'resume @ (-12, 70, 4)') },
+      { at: 18300, fn: () => log('builder', 'place oak_log @ (-12, 71, 4)') },
+      { at: 18900, fn: () => log('builder', 'place oak_log @ (-12, 72, 4)') },
+      { at: 19500, fn: () => log('builder', 'watchtower 78% complete') },
+      { at: 20300, fn: () => log('builder', 'watchtower complete (h=12)') },
+      { at: 20500, fn: () => task('t5', 'construct_watchtower', 'DONE') },
+
+      // DONE ================================================================
+      { at: 20900, fn: () => setState('DONE', 'session idle') },
+      { at: 21100, fn: () => chat('pincer_bot', 'bot', 'watchtower complete. standing by.') },
+      { at: 21600, fn: () => log('sys', 'session_idle. awaiting input.') },
+    ];
+
+    const SCRIPT_END_MS = 22500;
+    const LOOP_MS = 32000;
+
+    function play() {
+      reset();
+      tStart = Date.now();
+      clockInterval = setInterval(() => setClock(Date.now() - tStart), 100);
+      SCRIPT.forEach(evt => {
+        timers.push(setTimeout(evt.fn, evt.at));
+      });
+      // Stop the clock once the script wraps up.
+      timers.push(setTimeout(() => {
+        if (clockInterval) { clearInterval(clockInterval); clockInterval = null; }
+      }, SCRIPT_END_MS));
+    }
+
+    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (reduceMotion) {
+      // Render the final state once for accessibility.
+      tStart = Date.now();
+      SCRIPT.forEach(evt => evt.fn());
+      return;
+    }
+
+    // Only run while the demo is on screen.
+    let running = false;
+    let loopId  = null;
+
+    function start() {
+      if (running) return;
+      running = true;
+      play();
+      loopId = setInterval(play, LOOP_MS);
+    }
+    function stop() {
+      if (!running) return;
+      running = false;
+      clearTimers();
+      if (loopId) { clearInterval(loopId); loopId = null; }
+    }
+
+    if ('IntersectionObserver' in window) {
+      const io = new IntersectionObserver((entries) => {
+        entries.forEach(e => e.isIntersecting ? start() : stop());
+      }, { threshold: 0.12 });
+      io.observe(root);
+    } else {
+      start();
+    }
+  })();
+
+  /* ---- hero background: scroll-linked fade ---- */
+  (function () {
+    const hero = document.querySelector('.hero');
+    const bg = document.querySelector('.hero-bg');
+    if (!hero || !bg) return;
+    let ticking = false;
+    function update() {
+      ticking = false;
+      const h = hero.offsetHeight || 1;
+      // fully faded by the time you've scrolled ~85% of the hero's height
+      const p = Math.min(Math.max(window.scrollY / (h * 0.85), 0), 1);
+      bg.style.opacity = (1 - p).toFixed(3);
+    }
+    window.addEventListener('scroll', function () {
+      if (!ticking) { ticking = true; requestAnimationFrame(update); }
+    }, { passive: true });
+    window.addEventListener('resize', update, { passive: true });
+    update();
+  })();
+</script>
+
+</body>
+</html>
